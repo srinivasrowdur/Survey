@@ -308,7 +308,7 @@ def get_sector_success_messages(name: str) -> List[str]:
 
 def get_challenge_confirmation_message(challenge: str, name: str) -> str:
     """Generate challenge confirmation message"""
-    return f"""Thanks, so {challenge.lower()} are the key challenge you face."""
+    return f"""Thanks, so {challenge.lower()} is the key challenge you face. Please confirm: Yes or No."""
 
 def get_challenge_success_messages(name: str) -> List[str]:
     """Generate multiple messages after successful challenge identification"""
