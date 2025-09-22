@@ -6,6 +6,7 @@ from difflib import get_close_matches
 import openai
 import os
 import time
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -39,6 +40,8 @@ if "bot_last_sent" not in st.session_state:
     st.session_state.bot_last_sent = 0.0
 if "welcome_enqueued" not in st.session_state:
     st.session_state.welcome_enqueued = False
+if "bot_stream_delay" not in st.session_state:
+    st.session_state.bot_stream_delay = 0.02
 
 # Initialize welcome messages (paced) if this is the first time
 if (
@@ -475,8 +478,15 @@ def add_bot_messages_with_delay(messages: List[str], delay: float = 1.5):
     st.session_state.bot_delay = delay
     st.session_state.bot_queue.extend(messages)
 
+def _token_stream(text: str):
+    """Yield text progressively to simulate typing."""
+    step = st.session_state.get("bot_stream_delay", 0.02)
+    for ch in text:
+        yield ch
+        time.sleep(step)
+
 def _tick_bot_delivery():
-    """Deliver one queued bot message respecting the configured delay, then rerun."""
+    """Deliver one queued bot message with typing stream and pacing, then rerun."""
     if st.session_state.bot_queue:
         delay = st.session_state.get("bot_delay", 1.5)
         last = st.session_state.get("bot_last_sent", 0.0)
@@ -486,9 +496,25 @@ def _tick_bot_delivery():
             if elapsed < delay:
                 time.sleep(delay - elapsed)
         next_message = st.session_state.bot_queue.pop(0)
+        # Stream the assistant message live
+        with st.chat_message("assistant", avatar="🤖"):
+            st.write_stream(_token_stream(next_message))
+        # Persist to history for next rerun
         st.session_state.conference_messages.append({"role": "assistant", "content": next_message})
         st.session_state.bot_last_sent = time.time()
+        _scroll_to_bottom()
         st.rerun()
+
+def _scroll_to_bottom():
+    """Ensure the chat view scrolls to the latest message."""
+    components.html(
+        """
+        <script>
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        </script>
+        """,
+        height=0,
+    )
 
 def process_user_input(user_input: str):
     """Process user input based on current conversation step"""
@@ -693,11 +719,34 @@ def main():
     
     st.title("🤖 Conference Preparation Bot")
     st.markdown("---")
-    # Display chat messages
+    # Keep chat input fixed at the bottom and reserve space to avoid overlap
+    st.markdown(
+        """
+        <style>
+        section.main > div.block-container { padding-bottom: 120px; }
+        div[data-testid="stChatInput"] {
+            position: fixed;
+            left: 0; right: 0; bottom: 0;
+            padding: 0.5rem 1rem;
+            background: inherit;
+            backdrop-filter: blur(6px);
+            border-top: 1px solid rgba(250,250,250,0.12);
+            z-index: 1000;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Display chat messages using Streamlit's chat UI with avatars
     for message in st.session_state.conference_messages:
-        with st.chat_message(message["role"]):
+        role = message["role"]
+        avatar = "🤖" if role == "assistant" else "🙋"
+        with st.chat_message(role, avatar=avatar):
             st.markdown(message["content"])
     
+    # Auto-scroll to latest after rendering
+    _scroll_to_bottom()
+
     # If there are queued bot messages, deliver them progressively after rendering
     if st.session_state.bot_queue and not st.session_state.conference_completed:
         st.info("Assistant is typing…")
