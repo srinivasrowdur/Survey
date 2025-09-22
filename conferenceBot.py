@@ -7,6 +7,9 @@ import openai
 import os
 import time
 import streamlit.components.v1 as components
+import asyncio
+from agent import classify_where_they_work as agent_classify_where_they_work
+from agent import classify_challenge as agent_classify_challenge
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -56,7 +59,7 @@ if (
         "However, the collective feedback will provide valuable insights for all conference attendees.",
         "To get started, could you please tell me your name?"
     ]
-    st.session_state.bot_queue.extend(welcome_messages)
+    st.session_state.bot_queue.append("\n\n".join(welcome_messages))
     st.session_state.welcome_enqueued = True
     st.session_state.bot_last_sent = 0.0
 
@@ -93,8 +96,12 @@ SECTORS = {
                     "accommodation", "trains", "bus operators", "highways agencies", "waterways", "travel", "hospitality"]
     },
     "Education": {
-        "keywords": ["new admissions", "universities", "student support", "alumni services", "schools", 
-                    "primary", "secondary", "clearing", "education", "educational", "university", "school"]
+        "keywords": [
+                    "new admissions", "universities", "student support", "alumni services", "schools",
+                    "primary", "secondary", "clearing", "education", "educational", "university", "school",
+                    "teacher", "teachers", "teaching", "tutor", "tutoring", "lecturer", "professor",
+                    "faculty", "classroom", "college", "academy", "pe", "physical education"
+        ]
     },
     "Technology & IT": {
         "keywords": ["software", "hardware", "PC", "IT support", "technical support", "service desk", 
@@ -120,6 +127,7 @@ SECTORS = {
                     "emergency services", "emergency", "police", "fire", "ambulance"]
     }
 }
+
 
 # Challenge (Headwind) definitions with keywords
 CHALLENGES = {
@@ -147,201 +155,56 @@ CHALLENGES = {
 }
 
 def ai_match_sector(user_input: str) -> Tuple[Optional[str], List[str]]:
-    """Use AI to intelligently match user input to a sector"""
+    """Use the project's agent (agent.py) to classify the user's sector."""
     try:
-        # Create the prompt for AI
-        sectors_list = "\n".join([f"- {sector}" for sector in SECTORS.keys()])
-        
-        prompt = f"""You are an expert at categorizing business sectors. Given a user's description of their work sector, match it to the most appropriate sector from the list below.
-
-Available sectors:
-{sectors_list}
-
-User input: "{user_input}"
-
-Instructions:
-1. If the user input clearly matches ONE sector, return just that sector name
-2. If the user input could match MULTIPLE sectors, return them separated by commas
-3. If the user input doesn't match any sector, return "NO_MATCH"
-
-Examples:
-- "I work in a bank" → Financial Services
-- "I'm in retail sales" → Retail & E-commerce
-- "I work with patients" → Healthcare
-- "I handle bookings" → Could be Retail & E-commerce, Healthcare, or Travel & Hospitality
-
-Return only the sector name(s) or "NO_MATCH":"""
-
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0.1
-        )
-        
-        result = response.choices[0].message.content.strip()
-        
-        if result == "NO_MATCH":
+        # Ensure an event loop exists in Streamlit thread for agent runner
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        classification = agent_classify_where_they_work(user_input)
+        # classification is a Pydantic object from agent.py
+        if getattr(classification, "sector", None) == "Unknown":
             return None, []
-        
-        # Parse the result
-        if "," in result:
-            # Multiple matches
-            matches = [match.strip() for match in result.split(",")]
-            # Validate matches are in our sectors list
-            valid_matches = [match for match in matches if match in SECTORS.keys()]
-            if len(valid_matches) > 1:
-                return None, valid_matches
-            elif len(valid_matches) == 1:
-                return valid_matches[0], []
-            else:
-                return None, []
-        else:
-            # Single match
-            if result in SECTORS.keys():
-                return result, []
-            else:
-                return None, []
+        return getattr(classification, "sector", None), []
                 
     except Exception as e:
         st.error(f"AI matching error: {str(e)}")
         return None, []
 
 def find_sector_match(user_input: str) -> Tuple[Optional[str], List[str]]:
-    """Find the best sector match using AI with fallback"""
-    # Try AI matching first
-    if openai.api_key:
-        ai_result = ai_match_sector(user_input)
-        if ai_result[0] is not None or ai_result[1]:
-            return ai_result
-    
-    # Fallback to simple keyword matching
-    user_input_lower = user_input.lower().strip()
-    
-    # First, try exact match (case insensitive)
-    for sector in SECTORS.keys():
-        if sector.lower() == user_input_lower:
-            return sector, []
-    
-    # Try keyword matching
-    matches = []
-    for sector, data in SECTORS.items():
-        for keyword in data["keywords"]:
-            if keyword.lower() in user_input_lower:
-                matches.append(sector)
-                break
-    
-    # Remove duplicates while preserving order
-    unique_matches = []
-    for match in matches:
-        if match not in unique_matches:
-            unique_matches.append(match)
-    
-    if len(unique_matches) == 1:
-        return unique_matches[0], []
-    elif len(unique_matches) > 1:
-        return None, unique_matches
-    else:
+    """AI-only sector match. Requires OPENAI_API_KEY; no keyword fallback."""
+    if not openai.api_key:
+        st.error("AI agent not configured. Please set OPENAI_API_KEY.")
         return None, []
+    return ai_match_sector(user_input)
 
 def ai_match_challenge(user_input: str) -> Tuple[Optional[str], List[str]]:
-    """Use AI to intelligently match user input to a challenge category"""
+    """Use the project's challenge agent to classify the user's challenge."""
     try:
-        # Create the prompt for AI
-        challenges_list = "\n".join([f"- {challenge}" for challenge in CHALLENGES.keys()])
-        
-        prompt = f"""You are an expert at categorizing business challenges. Given a user's description of their key challenge, match it to the most appropriate challenge category from the list below.
-
-Available challenge categories:
-{challenges_list}
-
-User input: "{user_input}"
-
-Instructions:
-1. If the user input clearly matches ONE challenge category, return just that category name
-2. If the user input could match MULTIPLE categories, return them separated by commas
-3. If the user input doesn't match any category, return "NO_MATCH"
-
-Examples:
-- "We're struggling with new regulations" → Regulatory priorities
-- "Our customers want self-service options" → Technology acceleration
-- "We can't find skilled staff" → Shifting workplace realities
-- "Energy costs are rising" → Sustainability agenda
-- "Economic uncertainty is affecting us" → Economic volatility
-
-Return only the challenge category name(s) or "NO_MATCH":"""
-
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0.1
-        )
-        
-        result = response.choices[0].message.content.strip()
-        
-        if result == "NO_MATCH":
+        # Ensure an event loop exists in Streamlit thread for agent runner
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        classification = agent_classify_challenge(user_input)
+        # Log and return
+        category = getattr(classification, "category", None)
+        if category == "Unknown":
             return None, []
-        
-        # Parse the result
-        if "," in result:
-            # Multiple matches
-            matches = [match.strip() for match in result.split(",")]
-            # Validate matches are in our challenges list
-            valid_matches = [match for match in matches if match in CHALLENGES.keys()]
-            if len(valid_matches) > 1:
-                return None, valid_matches
-            elif len(valid_matches) == 1:
-                return valid_matches[0], []
-            else:
-                return None, []
-        else:
-            # Single match
-            if result in CHALLENGES.keys():
-                return result, []
-            else:
-                return None, []
-                
+        return category, []
     except Exception as e:
         st.error(f"AI matching error: {str(e)}")
         return None, []
 
 def find_challenge_match(user_input: str) -> Tuple[Optional[str], List[str]]:
-    """Find the best challenge match using AI with fallback"""
-    # Try AI matching first
-    if openai.api_key:
-        ai_result = ai_match_challenge(user_input)
-        if ai_result[0] is not None or ai_result[1]:
-            return ai_result
-    
-    # Fallback to simple keyword matching
-    user_input_lower = user_input.lower().strip()
-    
-    # First, try exact match (case insensitive)
-    for challenge in CHALLENGES.keys():
-        if challenge.lower() == user_input_lower:
-            return challenge, []
-    
-    # Try keyword matching
-    matches = []
-    for challenge, data in CHALLENGES.items():
-        for keyword in data["keywords"]:
-            if keyword.lower() in user_input_lower:
-                matches.append(challenge)
-                break
-    
-    # Remove duplicates while preserving order
-    unique_matches = []
-    for match in matches:
-        if match not in unique_matches:
-            unique_matches.append(match)
-    
-    if len(unique_matches) == 1:
-        return unique_matches[0], []
-    elif len(unique_matches) > 1:
-        return None, unique_matches
-    else:
+    """AI-only challenge match. Requires OPENAI_API_KEY; no keyword fallback."""
+    if not openai.api_key:
+        st.error("AI agent not configured. Please set OPENAI_API_KEY.")
         return None, []
+    return ai_match_challenge(user_input)
 
 def ai_validate_planning_scale(user_input: str) -> Optional[int]:
     """Use AI to intelligently parse planning scale input"""
@@ -473,10 +336,17 @@ def get_closing_message(name: str) -> str:
     """Generate the closing message"""
     return f"""Thank you very much {name.upper()} again for your time and we look forward to welcoming you at the conference"""
 
-def add_bot_messages_with_delay(messages: List[str], delay: float = 1.5):
-    """Queue multiple bot messages to be delivered with a delay between them."""
+def add_bot_messages_with_delay(messages: List[str], delay: float = 1.5, combine: bool = True):
+    """Queue bot messages with optional combination into a single streamed message.
+
+    - delay: gap between messages (only applies when combine=False)
+    - combine: when True, join messages into one block for a smoother UX
+    """
     st.session_state.bot_delay = delay
-    st.session_state.bot_queue.extend(messages)
+    if combine:
+        st.session_state.bot_queue.append("\n\n".join(messages))
+    else:
+        st.session_state.bot_queue.extend(messages)
 
 def _token_stream(text: str):
     """Yield text progressively to simulate typing."""
@@ -537,14 +407,14 @@ def process_user_input(user_input: str):
         sector_match, multiple_matches = find_sector_match(user_input)
         
         if sector_match:
-            # Single match found
-            confirmation = get_sector_confirmation_message(sector_match, st.session_state.conference_data["name"])
-            st.session_state.conference_messages.append({"role": "assistant", "content": confirmation})
-            st.session_state.conference_step = "sector_confirmation"
-            st.session_state.conference_data["pending_sector"] = sector_match
+            # AI returned a single sector; accept it and proceed without confirmation
+            st.session_state.conference_data["sector"] = sector_match
+            success_messages = get_sector_success_messages(st.session_state.conference_data["name"])
+            add_bot_messages_with_delay(success_messages, combine=True)
+            st.session_state.conference_step = "challenge_identification"
             
         elif multiple_matches:
-            # Multiple matches found
+            # Multiple matches found (kept for compatibility, though AI now returns one)
             matches_text = ", ".join(multiple_matches)
             suggestion = f"{st.session_state.conference_data['name'].upper()} could that be {matches_text}"
             st.session_state.conference_messages.append({"role": "assistant", "content": suggestion})
@@ -565,7 +435,7 @@ def process_user_input(user_input: str):
             del st.session_state.conference_data["pending_sector"]
             
             success_messages = get_sector_success_messages(st.session_state.conference_data["name"])
-            add_bot_messages_with_delay(success_messages)
+            add_bot_messages_with_delay(success_messages, combine=True)
             st.session_state.conference_step = "challenge_identification"
         else:
             # Ask for sector again
@@ -590,7 +460,7 @@ def process_user_input(user_input: str):
             del st.session_state.conference_data["pending_sector_options"]
             
             success_messages = get_sector_success_messages(st.session_state.conference_data["name"])
-            add_bot_messages_with_delay(success_messages)
+            add_bot_messages_with_delay(success_messages, combine=True)
             st.session_state.conference_step = "challenge_identification"
         else:
             # Ask for sector again
@@ -633,7 +503,7 @@ def process_user_input(user_input: str):
             del st.session_state.conference_data["pending_challenge"]
             
             success_messages = get_challenge_success_messages(st.session_state.conference_data["name"])
-            add_bot_messages_with_delay(success_messages)
+            add_bot_messages_with_delay(success_messages, combine=True)
             st.session_state.conference_step = "planning_assessment"
         else:
             # Ask for challenge again
@@ -658,7 +528,7 @@ def process_user_input(user_input: str):
             del st.session_state.conference_data["pending_challenge_options"]
             
             success_messages = get_challenge_success_messages(st.session_state.conference_data["name"])
-            add_bot_messages_with_delay(success_messages)
+            add_bot_messages_with_delay(success_messages, combine=True)
             st.session_state.conference_step = "planning_assessment"
         else:
             # Ask for challenge again
@@ -733,6 +603,29 @@ def main():
             border-top: 1px solid rgba(250,250,250,0.12);
             z-index: 1000;
         }
+        .typing-bar {
+            position: fixed;
+            left: 0; right: 0; bottom: 0;
+            display: flex; align-items: center; gap: 8px;
+            padding: 0.75rem 1rem;
+            background: inherit;
+            backdrop-filter: blur(6px);
+            border-top: 1px solid rgba(250,250,250,0.12);
+            z-index: 1000;
+            font-weight: 500;
+        }
+        .typing-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: currentColor; opacity: 0.6;
+            animation: blink 1.4s infinite both;
+        }
+        .typing-dot:nth-child(2) { animation-delay: .2s; }
+        .typing-dot:nth-child(3) { animation-delay: .4s; }
+        @keyframes blink {
+            0% { opacity: 0.2; }
+            20% { opacity: 1; }
+            100% { opacity: 0.2; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -747,9 +640,21 @@ def main():
     # Auto-scroll to latest after rendering
     _scroll_to_bottom()
 
+    # Production: hide debug UI
+
     # If there are queued bot messages, deliver them progressively after rendering
     if st.session_state.bot_queue and not st.session_state.conference_completed:
-        st.info("Assistant is typing…")
+        st.markdown(
+            """
+            <div class="typing-bar">
+                Assistant is typing…
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+                <span class="typing-dot"></span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         _tick_bot_delivery()
         return
     
@@ -758,7 +663,18 @@ def main():
     if not st.session_state.conference_completed:
         # Only allow input when the bot is not mid-delivery
         if st.session_state.bot_queue:
-            st.info("Assistant is typing…")
+            # Replace input with typing bar at bottom
+            st.markdown(
+                """
+                <div class=\"typing-bar\"> 
+                    Assistant is typing…
+                    <span class=\"typing-dot\"></span>
+                    <span class=\"typing-dot\"></span>
+                    <span class=\"typing-dot\"></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             return
         if st.session_state.conference_step == "welcome":
             prompt = st.chat_input("Please type in your name...")
