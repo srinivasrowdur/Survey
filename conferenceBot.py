@@ -5,6 +5,7 @@ import re
 from difflib import get_close_matches
 import openai
 import os
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -29,8 +30,22 @@ if "conference_step" not in st.session_state:
 if "conference_completed" not in st.session_state:
     st.session_state.conference_completed = False
 
-# Initialize welcome message if this is the first time
-if not st.session_state.conference_messages and st.session_state.conference_step == "welcome":
+# Pacing state for assistant messages
+if "bot_queue" not in st.session_state:
+    st.session_state.bot_queue = []
+if "bot_delay" not in st.session_state:
+    st.session_state.bot_delay = 1.5
+if "bot_last_sent" not in st.session_state:
+    st.session_state.bot_last_sent = 0.0
+if "welcome_enqueued" not in st.session_state:
+    st.session_state.welcome_enqueued = False
+
+# Initialize welcome messages (paced) if this is the first time
+if (
+    not st.session_state.conference_messages
+    and st.session_state.conference_step == "welcome"
+    and not st.session_state.welcome_enqueued
+):
     welcome_messages = [
         f"Hello! Welcome to the Conference Preparation Bot. My name is {BOT_NAME}.",
         "I'm here to help us understand your sector, challenges, and planning status to make our upcoming conference as relevant and valuable as possible for you.",
@@ -38,8 +53,9 @@ if not st.session_state.conference_messages and st.session_state.conference_step
         "However, the collective feedback will provide valuable insights for all conference attendees.",
         "To get started, could you please tell me your name?"
     ]
-    for message in welcome_messages:
-        st.session_state.conference_messages.append({"role": "assistant", "content": message})
+    st.session_state.bot_queue.extend(welcome_messages)
+    st.session_state.welcome_enqueued = True
+    st.session_state.bot_last_sent = 0.0
 
 # Sector definitions with keywords
 SECTORS = {
@@ -455,10 +471,24 @@ def get_closing_message(name: str) -> str:
     return f"""Thank you very much {name.upper()} again for your time and we look forward to welcoming you at the conference"""
 
 def add_bot_messages_with_delay(messages: List[str], delay: float = 1.5):
-    """Add multiple bot messages with typing delay for natural conversation flow"""
-    # Add all messages at once to avoid st.rerun() issues
-    for message in messages:
-        st.session_state.conference_messages.append({"role": "assistant", "content": message})
+    """Queue multiple bot messages to be delivered with a delay between them."""
+    st.session_state.bot_delay = delay
+    st.session_state.bot_queue.extend(messages)
+
+def _tick_bot_delivery():
+    """Deliver one queued bot message respecting the configured delay, then rerun."""
+    if st.session_state.bot_queue:
+        delay = st.session_state.get("bot_delay", 1.5)
+        last = st.session_state.get("bot_last_sent", 0.0)
+        now = time.time()
+        if last != 0.0:
+            elapsed = now - last
+            if elapsed < delay:
+                time.sleep(delay - elapsed)
+        next_message = st.session_state.bot_queue.pop(0)
+        st.session_state.conference_messages.append({"role": "assistant", "content": next_message})
+        st.session_state.bot_last_sent = time.time()
+        st.rerun()
 
 def process_user_input(user_input: str):
     """Process user input based on current conversation step"""
@@ -663,15 +693,24 @@ def main():
     
     st.title("🤖 Conference Preparation Bot")
     st.markdown("---")
-    
     # Display chat messages
     for message in st.session_state.conference_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
     
+    # If there are queued bot messages, deliver them progressively after rendering
+    if st.session_state.bot_queue and not st.session_state.conference_completed:
+        st.info("Assistant is typing…")
+        _tick_bot_delivery()
+        return
+    
     
     # Chat input
     if not st.session_state.conference_completed:
+        # Only allow input when the bot is not mid-delivery
+        if st.session_state.bot_queue:
+            st.info("Assistant is typing…")
+            return
         if st.session_state.conference_step == "welcome":
             prompt = st.chat_input("Please type in your name...")
         else:
